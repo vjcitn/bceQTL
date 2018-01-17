@@ -1,0 +1,3 @@
+
+used Breast_Mammary_Tissue_Analysis.snpgenes.gz
+intersected with names(bcGR)

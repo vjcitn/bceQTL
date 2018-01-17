@@ -1,0 +1,190 @@
+# Characterizing the SNPs with significant trans eQTL
+
+```{r setup,echo=FALSE}
+library(bceQTL)
+data(ernsig)
+ensig = names(ernsig)
+data(erpsig)
+epsig = names(erpsig)
+data(norsig)
+nosig = names(norsig)
+data(allpairedSig)
+apsig = names(allpairedSig)
+in4 = intersect(intersect(intersect(ensig,epsig),nosig),apsig)
+in3 = intersect(intersect(ensig,epsig),nosig)
+in3b = intersect(intersect(ensig,epsig),apsig)
+in2 = intersect(ensig,epsig)
+in2a = intersect(ensig,nosig)
+in2b = intersect(ensig,apsig)
+in2c = intersect(epsig,nosig)
+in2d = intersect(epsig,apsig)
+in2e = intersect(nosig,apsig)
+isSig = unique(c(ensig, epsig, nosig, apsig))
+```
+
+## starting a table
+
+```{r lkd,echo=FALSE}
+data(bcGR)
+sorted71 = sort(bcGR)
+sortedsig = sorted71[ which(names(sorted71) %in% isSig) ]
+trans = data.frame(rsid=names(sortedsig), chr=seqnames(sortedsig),
+   loc.hg19=start(sortedsig), stringsAsFactors=FALSE)
+tid = trans$rsid
+ntid = length(tid)
+status = rep("", ntid)
+status[ match(epsig, tid) ] = paste( status[ match(epsig, tid) ], "ER+", sep="" )
+status[ match(ensig, tid) ] = paste( status[ match(ensig, tid) ], ",ER-", sep="" )
+status[ match(nosig, tid) ] = paste( status[ match(nosig, tid) ], ",NOR", sep="" )
+status[ match(apsig, tid) ] = paste( status[ match(apsig, tid) ], ",TUM/NOR", sep="" )
+status = gsub("^,", "", status)
+olevs = c("TUM/NOR", "ER+", "ER-", "ER+,ER-", "ER+,ER-,NOR,TUM/NOR", 
+"ER-,NOR,TUM/NOR", "NOR,TUM/NOR", "ER-,NOR", "NOR")
+trans = cbind(trans, types=status)
+trans$types = ordered(trans$types, levels=olevs)
+trans = trans[order(trans$types),]
+obcGR = bcGR[trans$rsid]
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+txdb = TxDb.Hsapiens.UCSC.hg19.knownGene
+seqinfo(obcGR) = seqinfo(txdb)
+intronic = locateVariants(obcGR, txdb, IntronVariants())
+variantType = rep(NA_character_, nrow(trans))
+fo = findOverlaps(obcGR, intronic)
+sh = split(subjectHits(fo), queryHits(fo))
+intronInds = sapply(sh, "[", 1)
+intronBase = as.numeric(names(intronInds))
+intronAnn = as.numeric(intronInds)
+variantType[intronBase] = "intronic"
+harboring = mcols(intronic)$GENEID[intronAnn]
+library(Homo.sapiens)
+hsyms = mapIds(Homo.sapiens,keys=harboring,keytype="ENTREZID", column="SYMBOL")
+variantType[intronBase] = paste(variantType[intronBase], "(", hsyms, ")", sep="")
+trans = cbind(trans, variantType)
+```
+
+Here we define a function that can be used to progressively
+update the variantType in this trans data frame.
+```{r dogeta}
+data(vHMECseg)
+getAnnCol = function(anntype=CodingVariants, anntag="coding") {
+#
+# assumes trans has been started out
+#
+ stopifnot("variantType" %in% names(trans))
+ variantType = as.character(trans$variantType)
+ if (anntag == "chromhmm") {
+   stopifnot("intergenic" %in% trans$variantType)
+   ss = findOverlaps(vHMECseg, obcGR[trans$rsid])
+   vv = vHMECseg[queryHits(ss)]
+   variantType[ variantType == "intergenic" ] = vv[ variantType == "intergenic" ]$name
+   return(variantType)
+   }
+ locgr = locateVariants(obcGR, txdb, anntype())
+ locgr = unique(locgr)
+ fo = findOverlaps(obcGR, locgr)
+ sh = split(subjectHits(fo), queryHits(fo))
+ TypeInds = sapply(sh, "[", 1)
+ TypeBase = as.numeric(names(TypeInds))
+ TypeAnn = as.numeric(TypeInds)
+ variantType[TypeBase] = anntag
+ if (anntag == "intergenic") return(variantType)
+ harboring = mcols(locgr)$GENEID[TypeAnn]
+ library(Homo.sapiens)
+ hsyms = mapIds(Homo.sapiens,keys=harboring,keytype="ENTREZID", column="SYMBOL")
+ variantType[TypeBase] = paste(variantType[TypeBase], "(", hsyms, ")", sep="")
+ variantType
+}
+trans$variantType = getAnnCol()
+trans$variantType = getAnnCol(IntergenicVariants, "intergenic")
+trans$variantType = getAnnCol(NULL, "chromhmm")
+trans
+```
+
+We now have annotated all the variants and their tissue sources.
+Let's indicate the trans targets by count.
+
+```{r tlists}
+tlists = list(erpsig, ernsig, norsig, allpairedSig) ## all snp-gene lists
+targcount = rep(0, nrow(trans))
+tcounts = matrix(0, nr=nrow(trans), nc=4)
+rownames(tcounts) = trans$rsid
+colnames(tcounts) = c("ER+", "ER-", "NOR", "PAIR")
+names(targcount) = trans$rsid
+for (i in 1:length(tlists)) {
+    oni = names(tlists[[i]])
+    for (j in 1:length(tlists[[i]])) {
+       targcount[oni[j]] = targcount[oni[j]] + nrow(tlists[[i]][[oni[j]]])
+       tcounts[oni[j], i] = tcounts[oni[j],i] + nrow(tlists[[i]][[oni[j]]])
+    }
+  }
+trans = cbind(trans, tcounts)
+```
+
+We'll compute the MAF in tumor tissue samples (the most numerous).
+
+```{r lkmaf}
+cmaf = function(x) min(c(sum(x)/(2*length(x)),1-sum(x)/(2*length(x))))
+data(nhscancpcns_ann)
+pdn= names(pData(nhscancpcns_ann))
+rsdat = data.matrix( pData(nhscancpcns_ann)[, trans$rsid ] )
+cmafs = apply(rsdat,2,cmaf) # columns are SNP
+trans$MAF = round(cmafs,3)
+```
+
+
+We retrieved the CADD 1.3 scores and will bind them in.
+
+```{r getca,cache=TRUE}
+data(caddOut)
+cogr = GRanges(caddOut$Chrom, IRanges(caddOut$Pos,width=1))
+seqlevelsStyle(cogr) = "UCSC"
+mcols(cogr)$PHRED = caddOut$PHRED
+tgr = GRanges(trans$chr, IRanges(trans$loc.hg19,width=1))
+fo = findOverlaps(cogr, tgr)
+tgr$PHRED = NA
+tgr$PHRED[subjectHits(fo)] = cogr$PHRED[queryHits(fo)]
+trans$PHRED=tgr$PHRED
+trans
+```
+
+
+Counting unique genes with association to SNP.
+
+```{r lktot,cache=TRUE}
+tlist = list(erpsig, ernsig, norsig, allpairedSig)
+ntarg = length(unn <- unique(unlist(lapply(tlist, function(x) lapply(x, function(z) z$symbol)))))
+nontc = length(grep("^TC", unn, invert=TRUE, value=TRUE))
+print(ntarg)
+print(nontc)
+```
+ 
+Let's define a permutation procedure to confirm the very large numbers of trans 
+in ER- tissue.
+We want to understand how frequently under a permutation of genotype against
+expression, such a large number of trans results arises.
+
+```{r doperm,cache=TRUE}
+runmodelPerm = function (eset, snpset, ntokeep = 50) 
+{
+    require(limma)
+    fmlas = lapply(paste0(paste0("~", snpset), "+agedx+dxyr+factor(PlateNum)"), 
+        as.formula)
+    ans = foreach(i = 1:length(snpset)) %dopar% {
+        pData(eset)[,snpset[i]] = sample(pData(eset)[,snpset[i]], replace=FALSE)
+        topTable(eBayes(lmFit(eset, 
+        model.matrix(fmlas[[i]], data = pData(eset)))), coef = 2, 
+        n = ntokeep)
+        }
+    names(ans) = snpset
+    return(ans)
+}
+p390 = foreach(i=1:1000) %dopar% 
+   {sum(runmodelPerm(tumERN, "rs132390", 200)[[1]]$adj.P.Val<0.1)}
+print(mean(unlist(p390)>=86))
+p833 = foreach(i=1:1000) %dopar% 
+   {sum(runmodelPerm(tumERN, "rs11571833", 200)[[1]]$adj.P.Val<0.1)}
+print(mean(unlist(p833)>=186))
+p111 = foreach(i=1:1000) %dopar% 
+   {sum(runmodelPerm(tumERN, "rs17529111", 200)[[1]]$adj.P.Val<0.1)}
+print(mean(unlist(p111)>=24))
+```

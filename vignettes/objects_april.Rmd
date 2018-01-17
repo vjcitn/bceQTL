@@ -1,0 +1,114 @@
+
+A review of key objects for tabulation in the bceQTL paper.
+
+```{r setup,echo=FALSE,results="hide"}
+suppressPackageStartupMessages({
+library(bceQTL)
+})
+```
+
+The 71 SNP:
+```{r lksn}
+data(bcGR)
+head(bcGR,2)
+```
+
+The expression data for normal tissue:
+```{r lknor}
+data(nhsnormpcns_ann)
+nhsnormpcns_ann
+```
+
+The tests for association between SNP and expression in normal tissue.
+
+```{r runnor, cache=TRUE}
+library(doParallel)
+registerDoParallel(cores=2)
+norfits = runmodel(nhsnormpcns_ann, names(bcGR))
+```
+
+We filter to FDR 0.10.
+
+```{r filtnor}
+norsig = lapply(norfits, function(x)x[x$adj.P.Val <= 0.10,])
+norsig = norsig[sapply(norsig, nrow)>0]
+```
+
+The tests for association between SNP and expression in tumor tissue.
+
+```{r runtum, cache=TRUE}
+data(nhscancpcns_ann)
+tumfits = runmodel(nhscancpcns_ann, names(bcGR))
+tumsig = lapply(tumfits, function(x)x[x$adj.P.Val <= 0.10,])
+tumsig = tumsig[sapply(tumsig, nrow)>0]
+```
+
+The tests for association between SNP and expression in ER+ tumor tissue.
+
+```{r runtumerp, cache=TRUE}
+nhscancpcns_ann_eravail = nhscancpcns_ann[, !is.na(nhscancpcns_ann$erpos)]
+erpfits = runmodel(nhscancpcns_ann_eravail[ ,nhscancpcns_ann_eravail$erpos==1], names(bcGR))
+erpsig = lapply(erpfits, function(x)x[x$adj.P.Val <= 0.10,])
+erpsig = erpsig[sapply(erpsig, nrow)>0]
+ernfits = runmodel(nhscancpcns_ann_eravail[ ,nhscancpcns_ann_eravail$erpos==0], names(bcGR), ntokeep=200)
+ernsig = lapply(ernfits, function(x)x[x$adj.P.Val <= 0.10,])
+ernsig = ernsig[sapply(ernsig, nrow)>0]
+```
+
+We have the quadpanel visualizer
+```{r vizone,fig=TRUE}
+data(tcann)
+tumERP = nhscancpcns_ann[, which(nhscancpcns_ann$erpos=="1")]
+tumERN = nhscancpcns_ann[, which(nhscancpcns_ann$erpos!="1")]
+norERP = nhsnormpcns_ann[, which(nhsnormpcns_ann$erpos=="1")]
+norERN = nhsnormpcns_ann[, which(nhsnormpcns_ann$erpos!="1")]
+quadpanel("rs17529111", "TC0700260", tumERN, tumERP, norERN, norERP)
+```
+
+We also have the bceBrowse function that has three panels:
+quadplot (for selected SNP-gene pair), stats (full set of
+statistics and annotation for selected SNP, does not update
+for changes to gene viewed), and layout (tabulation of
+genotypes for normal/tumor ER+/- groups.)  
+
+Tumor vs normal.  To accomplish this we will harmonize
+into one ExpressionSet and then test for contrast.
+We will need to do something about correlation -- perhaps
+filter and follow by LME.
+
+```{r buildcomb}
+canc = nhscancpcns_ann
+sampleNames(canc) = canc$nhsid
+norm = nhsnormpcns_ann
+sampleNames(norm) = norm$nhsid
+common = intersect(sampleNames(canc), sampleNames(norm))
+canc = canc[,common]
+norm = norm[,common]
+canc$isTumor = 1
+norm$isTumor = 0
+sampleNames(canc) = paste0(sampleNames(canc), "C")
+sampleNames(norm) = paste0(sampleNames(norm), "N")
+comb = combine(canc, norm)
+```
+
+Running the model on the combined data involves finding the
+coefficient for the interaction of snp and tissue type.
+```{r modfun}
+runmodelComb = function (eset, snpset, ntokeep = 100) 
+{
+    require(limma)
+    fmlas = lapply(paste0(paste0("~", snpset), "*isTumor+agedx+dxyr+factor(PlateNum)+factor(nhsid)"), 
+        as.formula)
+    onemm = model.matrix(fmlas[[1]], data = pData(eset))
+    index_interact = grep(":", colnames(onemm))
+print(index_interact)
+    ans = foreach(i = 1:length(snpset)) %dopar% topTable(eBayes(lmFit(eset, 
+        model.matrix(fmlas[[i]], data = pData(eset)))), coef = index_interact, 
+        n = ntokeep)
+    names(ans) = snpset
+    return(ans)
+}
+```
+
+The allpairedSig object comes from running the above on comb and names(bcGR)
+and filtering to the results with FDR < .1.

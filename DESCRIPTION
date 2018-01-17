@@ -1,0 +1,13 @@
+Package: bceQTL
+Title: breast cancer eQTL in NHS
+Version: 0.0.21
+Author: VJ Carey <stvjc@channing.harvard.edu>
+Description: breast cancer eQTL in NHS
+Suggests: knitr
+Depends: methods, Biobase, GenomicRanges, VariantAnnotation,
+	EnsDb.Hsapiens.v75, ggplot2, shiny
+Maintainer: VJ Carey <stvjc@channing.harvard.edu>
+License: Private
+LazyLoad: yes
+BiocViews:
+VignetteEngine: knitr

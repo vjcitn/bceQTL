@@ -1,0 +1,468 @@
+---
+title: "bceQTL -- wind up the breast cancer eQTL paper"
+author: "Vincent J. Carey, stvjc at channing.harvard.edu"
+date: "February 2015"
+output:
+  pdf_document:
+    toc: yes
+    number_sections: yes
+  html_document:
+    highlight: pygments
+    number_sections: yes
+    theme: united
+    toc: yes
+---
+
+<!--
+%\VignetteEngine{knitr::rmarkdown}
+%\VignetteIndexEntry{xyz}
+-->
+
+# Overview of plan
+
+Restructure argument in results.  1) FFPE tissue can be used and
+is concordant with non FFPE tissue from TCGA in the discrimination
+of receptor status using available genes in the oncotype DX
+21 gene signature.  2)  71 SNP do not admit of straightforward
+dimension reduction, genetic heterogeneity is pronounced.  3)
+Receptor-status-specific trans-eQTL can be identified.  It
+seems wise to focus on MAF > 5%, but a rare SNP in BRCA
+seems to have many trans associations. 
+
+
+# Basic data
+
+## 71 meta-analytically identified SNP
+
+```{r getl,echo=FALSE,results="hide"}
+suppressPackageStartupMessages({
+library(bceQTL)
+library(NHSbreastAnalysis)
+library(genefu)
+library(DT)
+library(limma)
+library(org.Hs.eg.db)
+library(SIFT.Hsapiens.dbSNP137)
+library(PolyPhen.Hsapiens.dbSNP131)
+library(EnsDb.Hsapiens.v79)
+})
+
+```{r ch1}
+library(bceQTL)
+data(bcGR)
+bcGR
+```
+
+MAF computation in this cohort
+
+```{r mafdo}
+data(nhscancpcns_ann)
+snd = pData(nhscancpcns_ann)[, grep("^rs", names(pData(nhscancpcns_ann)))]
+tabs = apply(snd,2,table) 
+numb = function(x) sum(as.numeric(names(x))*x)
+countb = sapply(tabs, numb) 
+mafs = ifelse(countb>376, (752-countb)/752, countb/752)
+sort(round(mafs,3))
+```
+
+
+## Genomic contexts of variants via locateVariants against models in TxDb.Hsapiens.UCSC.hg19.knownGene
+
+```{r ch2}
+data(bcLocvar)
+table(bcLocvar$LOCATION)
+```
+
+## Variant effect prediction
+
+```{r vep}
+iii = na.omit(select(SIFT.Hsapiens.dbSNP137, keys=gsub("rs", "", names(bcGR)), 
+   columns=c("CODONCHANGE", "TYPE", "SIFTPRED"))[,1:3])
+iii
+iii = select(PolyPhen.Hsapiens.dbSNP131, keys=names(bcGR), columns=c("PREDICTION", "EFFECT"))
+na.omit(iii[,1:2])
+```
+
+## Expression and genotype data for tumor and normal samples
+
+```{r ch3}
+library(NHSbreastAnalysis)
+data(nhscancpcns)
+data(nhsnormpcns)
+nhscancpcns
+```
+
+# A quick view of genetic variation in tumor samples
+
+## ER-
+```{r ch4}
+erneg = nhscancpcns[, which(nhscancpcns$erpos == 0 & !is.na(nhscancpcns$erpos))]
+snpinds = grep("^rs", names(pData(erneg)))
+erngtdf = pData(erneg)[,snpinds]
+erngtdf[1:3,1:4]
+pc = prcomp(erngtdf)
+```
+
+## ER+
+```{r ch5}
+erpos = nhscancpcns[, which(nhscancpcns$erpos == 1 & !is.na(nhscancpcns$erpos))]
+erpgtdf = pData(erpos)[,snpinds]
+erpgtdf[1:3,1:4]
+ppc = prcomp(erpgtdf)
+```
+
+## Comparative
+
+Dimension reduction of genotypes would not be fruitful.
+
+```{r compp,fig=TRUE}
+library(ggbiplot)
+ggbiplot(pc, alpha=.3, varname.size=0) + ggtitle("ER-") + ylim(c(-3,3))
+```
+```{r comp2,fig=TRUE}
+ggbiplot(ppc, alpha=.3, varname.size=0) + ggtitle("ER+") + ylim(c(-3,3))
+```
+
+# Comparison of expression patterns between FFPE and primary tissue
+
+## TCGA, non-FFPE
+
+```{r get2l}
+library(bceQTL)
+library(DT)
+```
+```{r lkTCGA,cache=TRUE}
+#data(logTCGArsemp1ES) # divided owing to github size constraints
+data(logTCGA_part1)
+data(logTCGA_part2)
+logTCGArsemp1ES = combine(logTCGA_part1, logTCGA_part2)
+```
+```{r continu}
+nonffpe = logTCGArsemp1ES[, logTCGArsemp1ES$isFFPE == FALSE]
+nonffpe = nonffpe[, which(!is.na(nonffpe$erprstatus))]
+nonffpe
+library(limma)
+des = model.matrix(~factor(erprstatus), data=pData(nonffpe))
+m1 = lmFit(nonffpe, des)
+em1 = eBayes(m1)
+nonf100 = topTable(em1, 2:4, n=100) # distinguish (ER,PR): -+, -+, ++
+#datatable(nonf100)
+head(nonf100)
+```
+
+## NHS, FFPE
+
+```{r klknhs}
+data(nhscancpcns_ann)
+nhscancpcns_ann$erprstatus = with(pData(nhscancpcns_ann), 
+      ifelse(erpos, ifelse(prpos, "++", "+-"), ifelse(prpos, "-+", "--")))
+ffpe = nhscancpcns_ann[, which(!is.na(nhscancpcns_ann$erprstatus))]
+ffpe
+des = model.matrix(~factor(erprstatus), data=pData(ffpe))
+m2 = lmFit(ffpe, des)
+em2 = eBayes(m2)
+f100 = topTable(em2, 2:4, n=100) # distinguish (ER,PR): -+, -+, ++
+#datatable(f100)
+head(f100)
+```
+
+## Intersection
+
+```{r doint}
+nonffpef = featureNames(nonffpe)
+ffpefsym = fData(ffpe)$sym
+ok = intersect(nonffpef, ffpefsym)
+ffpecomm = ffpe[which(fData(ffpe)$sym %in% ok),]
+# must drop duplicates
+featureNames(ffpecomm) = make.names(fData(ffpecomm)$sym, unique=TRUE)
+nonffpecomm = nonffpe[ok,]
+ffpecomm = ffpecomm[featureNames(nonffpecomm),]
+nonffdes = model.matrix(~factor(erprstatus), data=pData(nonffpecomm))
+ffdes = model.matrix(~factor(erprstatus), data=pData(ffpecomm))
+m4 = lmFit(ffpecomm, ffdes)
+em4 = eBayes(m4)
+ffcomtab = topTable(em4, 2:4, n=Inf)
+m5 = lmFit(nonffpecomm, nonffdes)
+em5 = eBayes(m5)
+nonffcomtab = topTable(em5, 2:4, n=Inf)
+offcomtab = ffcomtab[rownames(nonffcomtab),]
+all.equal(rownames(offcomtab), rownames(nonffcomtab))
+nnon = ncol(nonffpe)
+nnhs = ncol(ffpe)
+```
+
+The NHS provides expression data on `r nnhs` FFPE samples.
+To assess the biological interpretability of the NHS expression assays based on
+FFPE tissue, we obtained the RSEM-based RNA-seq
+gene quantifications on `r nnon` non-FFPE samples from the TCGA BRCA cohort.
+Using HUGO identifiers for genes, the two platforms had
+9316 features in common.  For platforms $p \in \{NHS, TCGA\}$
+we fit (using limma) the 9316 models
+\[
+y_{igp} = \alpha_{gp} + x_i\beta_{gp} + e_{igp}
+\]
+with $g$ indexing genes and $i$ indexing individuals assayed
+on platform $p$; $x_i$ is a dummy vector indicating whether
+patient $i$ is +-, -+, or ++ for ER/PR tumor status.
+The (regularized) $F$ statistics for $H_o: \beta_{gp} = 0$ were computed
+for each platform as a basic measure of assay sensitivity
+to differences in tumor biology.
+```{r getdfs,echo=FALSE,results="hide"}
+m1 = with(pData(ffpe), summary(lm(exprs(ffpe)[1,]~erprstatus)))
+m2 = with(pData(nonffpe), summary(lm(exprs(nonffpe)[1,]~erprstatus)))
+nonfddf = as.integer(m2$fstat[3])
+nhsfddf = as.integer(m1$fstat[3])
+```
+Owing to the different sample sizes,
+the denominator degrees of freedom for
+the F statistics are very different (`r nhsfddf` for NHS and
+`r nonfddf` for TCGA).
+We use the statistics to rank the models, and
+thereby genes, according to their capacity to distinguish
+expression variation between samples derived from tumors of 
+different hormone receptor types.
+
+
+The rank correlation of $2 \times 9316 F_{3,d}$ statistics between platforms
+value 0.43 ($p < 10^{-10}$).
+```{r lksp}
+cor.test(offcomtab$F, nonffcomtab$F, method="spearman")
+```
+A more focused comparison was devised using the Oncotype DX
+signature genes, 17 of which were assayed on both platforms.
+For these genes the regularized $F_{3,d}$ statistics were strongly correlated
+between the platforms (Spearman $\rho$ = 0.85, $p < 10^{-10}$.)
+
+```{r lkoncod}
+library(genefu)
+on21 = intersect(sig.oncotypedx$sym, rownames(offcomtab))
+cor.test(offcomtab[on21,"F"], nonffcomtab[on21,"F"], method="spearman")
+```
+
+These F statistics are displayed below for the two assay types; the robust log-log regression line
+estimated by the least-trimmed squares algorithm of the MASS library
+(Venables and Ripley, 2002) has coefficients -0.65 and 1.84.
+For the F distribution with degrees of freedom (3,322), the Bonferroni
+corrected 5\% significance threshold is `r round(qf(1-.05/9316, 3, 322), 1)`,
+and thus the majority of tests illustrated are individually statistically
+significant, genome-wide.
+
+```{r lkonco,fig=TRUE}
+plot(offcomtab[on21,"F"], nonffcomtab[on21,"F"], log="xy",
+ylab="F (3,1016): TCGA BRCA RNA-seq)", xlab="F (3,322) (NHS BRCA GlueGrant)")
+text(offcomtab[on21,"F"], nonffcomtab[on21,"F"]*1.2, on21, cex=.8)
+abline(h=9.5, lty=2, col="gray")
+abline(v=9.5, lty=2, col="gray")
+suppressPackageStartupMessages({
+library(MASS)
+})
+robm = lqs(log(nonffcomtab[on21,"F"])~log(offcomtab[on21,"F"]), method="lts")
+robm
+abline(robm)
+detach("package:MASS", unload=TRUE) # drop 'select'
+```
+
+We conclude that the GlueGrant gene expression assay of the FFPE samples
+has prima facie validity for the objective of identifying
+eQTL.
+
+# Additional material on genomic contexts of 71 variants
+
+## SNPs located in gene annotation regions
+
+We tabulate the various structural elements in which the SNP are found.
+```{r lkloc2}
+data(bcLocvar)
+library(org.Hs.eg.db)
+bcwg = bcLocvar[-which(is.na(bcLocvar$GENEID))]
+g11 = mapIds(org.Hs.eg.db, keys=bcwg$GENEID, keytype="ENTREZID", column="SYMBOL")
+bcwg$sym = g11
+#spl = split(mcols(bcwg)[, c("LOCATION", "LOCSTART")], bcwg$sym)
+#filtable = function(x) { tmp = table(x); tmp[tmp>0] }
+#lapply(spl, function(x) filtable(x$LOCATION))
+spl = split(mcols(bcwg)[, c("LOCSTART", "sym", "QUERYID")], bcwg$LOCATION)
+filtable = function(x) { tmp = table(x); tmp[tmp>0] }
+byloc = lapply(spl, function(x) filtable(x$sym))
+lbl = sapply(byloc, length)
+byloc[lbl>0]
+```
+
+We distinguish counts of distinct SNP in genes vs number of transcripts occupied.
+```{r lklloc3}
+lapply(spl, function(x) apply(table(x$QUERYID, x$sym),2,function(x)sum(x>0)))
+```
+Three genes have introns affected by more than one SNP:
+CCDC170, FTO, RAD51B.
+
+## SNPs in intergenic regions
+
+```{r dointer}
+bcs = split(bcLocvar, bcLocvar$LOCATION)
+data(vHMECseg)
+su = findOverlaps(vHMECseg, bcs$intergenic)
+mat = vHMECseg[queryHits(su)]
+nm = bcs$intergenic[subjectHits(su)]$rsid
+mat$rsid = nm
+snpbystate = split(mat$rsid, mat$name)
+snpbystate
+```
+
+
+# eQTL analysis
+
+## ER- general search
+```{r doeq1,cache=TRUE}
+library(bceQTL)
+data(nhscancpcns_ann)
+data(nhsnormpcns_ann)
+data(bcGR)
+library(limma)
+erneg = nhscancpcns_ann[ , which(nhscancpcns_ann$erpos == 0 &
+   !is.na(nhscancpcns_ann$erpos)) ]
+normerneg = nhsnormpcns_ann[ , which(nhsnormpcns_ann$erpos == 0 &
+   !is.na(nhsnormpcns_ann$erpos)) ]
+library(doParallel); 
+registerDoParallel(cores=3); 
+topt71_ern = runmodel(erneg, names(bcGR), ntokeep=500)
+erncounts = sapply(topt71_ern, function(x)sum(x$adj.P.Val < 0.1))
+erncounts[erncounts>0]
+topt71_normern = runmodel(normerneg, names(bcGR), ntokeep=500)
+normerncounts = sapply(topt71_normern, function(x)sum(x$adj.P.Val < 0.1))
+normerncounts[normerncounts>0]
+```
+
+## ER+ general search
+
+```{r doeq2,cache=TRUE}
+erpos = nhscancpcns_ann[ , which(nhscancpcns_ann$erpos == 1 &
+   !is.na(nhscancpcns_ann$erpos)) ]
+normerpos = nhsnormpcns_ann[ , which(nhsnormpcns_ann$erpos == 1 &
+   !is.na(nhsnormpcns_ann$erpos)) ]
+library(doParallel); 
+registerDoParallel(cores=3); 
+topt71_erp = runmodel(erpos, names(bcGR), ntokeep=500)
+erpcounts = sapply(topt71_erp, function(x)sum(x$adj.P.Val < 0.1))
+erpcounts[erpcounts>0]
+topt71_normerp = runmodel(normerpos, names(bcGR), ntokeep=500)
+normerpcounts = sapply(topt71_normerp, function(x)sum(x$adj.P.Val < 0.1))
+normerpcounts[normerpcounts>0]
+```
+
+## Triple-negative search
+
+```{r doeq3,cache=TRUE}
+tneg = nhscancpcns_ann$erpos == 0 & nhscancpcns_ann$prpos == 0 &
+ nhscancpcns_ann$her2pos == 0
+nhscancpcns_ann$tripneg = tneg
+tripneg = nhscancpcns_ann[ , which(nhscancpcns_ann$tripneg == 1 &
+   !is.na(nhscancpcns_ann$tripneg)) ]
+library(doParallel); 
+registerDoParallel(cores=3); 
+topt71_tn = runmodel(tripneg, names(bcGR), ntokeep=500)
+tncounts = sapply(topt71_tn, function(x)sum(x$adj.P.Val < 0.1))
+tncounts[tncounts>0]
+```
+
+# Summing up
+
+## SNPs with gene annotation
+
+```{r bygene}
+byg = lapply(split(bcLocvar$rsid, bcLocvar$sym), unique)
+perg = vector("list", length(byg))
+for (i in 1:length(byg)) {
+ for (j in 1:length(byg[[i]])) {
+ erneghits = topt71_ern[[byg[[i]][j]]]
+ perg[[i]] = erneghits[ which(erneghits$adj.P.Val < 0.1), ]
+ erposhits = topt71_erp[[byg[[i]][j]]]
+ perg[[i]] = rbind(perg[[i]], erposhits[ which(erposhits$adj.P.Val < 0.1), ])
+ if (nrow(perg[[i]])>0) {
+    perg[[i]]$rsid = byg[[i]][j]
+    perg[[i]]$hostgene = names(byg)[i]
+    }
+ }
+}
+names(perg) = names(byg)
+perg = perg[ sapply(perg, nrow) > 0 ]
+bestInG = lapply(perg, head, 1)
+```
+
+```{r lkzm,fig=TRUE, fig.height=3, fig.width=6.5}
+data(tcann)
+library(EnsDb.Hsapiens.v79)
+names(bcLocvar) = bcLocvar$rsid
+#quadpanel("rs704010", "TC0701086", erneg, erpos, normerneg, normerpos)
+qp2 = function(snp, probe, neges, poses, normneges, normposes) {
+  require(NHSbreastAnalysis)
+  data(tcann)
+  data(bcLocvar)
+  require(EnsDb.Hsapiens.v79)
+  names(bcLocvar) = bcLocvar$rsid
+  anno = bcLocvar[snp]
+  rel = paste(anno$LOCATION, anno$sym, sep=":")
+  if (length(rel)>1) rel = paste(rel, collapse=", ")
+  quadpanel(snp, probe, neges, poses, normneges, normposes, paste0(" ", rel))
+  }
+qp3 = function(snp, probe, neges, poses, normneges, normposes, instate) {
+  require(NHSbreastAnalysis)
+  data(tcann)
+  data(bcLocvar)
+  require(EnsDb.Hsapiens.v79)
+  names(bcLocvar) = bcLocvar$rsid
+  anno = bcLocvar[snp]
+  quadpanel(snp, probe, neges, poses, normneges, normposes, paste0(" ", instate))
+  }
+for (i in 1:length(bestInG))
+  print( qp2( bestInG[[i]]$rsid, bestInG[[i]]$probeset_id, erneg, erpos, normerneg, normerpos) )
+```
+ 
+## Intergenic SNP
+
+```{r dointg}
+pers = vector("list", length(snpbystate))
+for (i in 1:length(snpbystate)) {
+ for (j in 1:length(snpbystate[[i]])) {
+ erneghits = topt71_ern[[snpbystate[[i]][j]]]
+ pers[[i]] = erneghits[ which(erneghits$adj.P.Val < 0.5), ]
+ erposhits = topt71_erp[[snpbystate[[i]][j]]]
+ pers[[i]] = rbind(pers[[i]], erposhits[ which(erposhits$adj.P.Val < 0.5), ])
+ if (nrow(pers[[i]])>0) {
+    pers[[i]]$rsid = snpbystate[[i]][j]
+    pers[[i]]$state = names(snpbystate)[i]
+    }
+ }
+}
+names(pers) = names(snpbystate)
+pers = pers[ sapply(pers, nrow) > 0 ]
+bestInState = lapply(pers, head, 1)
+```
+
+# Characteristic tumor minus normal results
+
+```{r dif1,fig=TRUE, fig.height=3, fig.width=6.5}
+quadpanel("rs3757318", "TC1901552", erneg, erpos, normerneg, normerpos, " intronic:C6orf97")
+```
+
+```{r dif2,fig=TRUE, fig.height=3, fig.width=6.5}
+quadpanel("rs8100241", "TC1600567", erneg, erpos, normerneg, normerpos, " coding:ANKLE1")
+```
+
+# Circos plots
+
+The tables linking SNPs to genes are re-expressed as lists
+with named elements corresponding to SNP rsid and each element
+the vector of gene symbols.  Example:
+
+```{r dota}
+data(normTab1)
+normTab1
+```
+
+We can make a circos plot, given such a list.  The slow
+part is looking up the addresses for the SNP.
+
+```{r ooa,fig=TRUE}
+sglToCircos(normTab1)
+```
+
+This should be done for each table.
